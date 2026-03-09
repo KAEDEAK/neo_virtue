@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neo Virtue</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a1a;
+    overflow: hidden;
+    font-family: 'Segoe UI', 'Yu Gothic UI', sans-serif;
+    cursor: default;
+  }
+
+  canvas#bg {
+    position: fixed;
+    top: 0; left: 0;
+    z-index: 0;
+  }
+
+  svg#map {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1;
+  }
+
+  /* Sparkle cursor trail */
+  .sparkle {
+    position: fixed;
+    pointer-events: none;
+    z-index: 10;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    animation: sparkle-fade 0.8s ease-out forwards;
+  }
+  @keyframes sparkle-fade {
+    0%   { transform: scale(1) rotate(0deg); opacity: 1; }
+    100% { transform: scale(0) rotate(180deg); opacity: 0; }
+  }
+
+  /* Tooltip */
+  #tooltip {
+    position: fixed;
+    z-index: 20;
+    background: rgba(10, 10, 30, 0.92);
+    border: 1px solid rgba(255,255,255,0.15);
+    backdrop-filter: blur(12px);
+    border-radius: 12px;
+    padding: 14px 18px;
+    color: #eee;
+    font-size: 14px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s;
+    max-width: 260px;
+    box-shadow: 0 0 30px rgba(100, 140, 255, 0.15);
+  }
+  #tooltip.show { opacity: 1; }
+  #tooltip .tt-en  { font-size: 16px; font-weight: 600; }
+  #tooltip .tt-ja  { font-size: 13px; opacity: 0.7; margin-top: 2px; }
+  #tooltip .tt-desc { font-size: 12px; opacity: 0.55; margin-top: 8px; line-height: 1.5; }
+
+  #credit {
+    position: fixed;
+    bottom: 12px; right: 16px;
+    z-index: 5;
+    color: rgba(255,255,255,0.3);
+    font-size: 11px;
+    pointer-events: none;
+    letter-spacing: 0.5px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bg"></canvas>
+<svg id="map" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<div id="credit">- Neo Virtue -&ensp;&copy; Maple and the Galaxy exponent 23</div>
+
+<div id="tooltip">
+  <div class="tt-en"></div>
+  <div class="tt-ja"></div>
+  <div class="tt-desc"></div>
+</div>
+
+<script>
+// ── Language ──
+const isJa = /^ja\b/i.test(navigator.language);
+
+// ── Data ──
+const nodes = [
+  { id:4,  en:"Compassion",       ja:"思いやり",     row:0, col:1,   hue:330,
+    descJa:"他者の苦しみに共感し、助けたいと感じる優しさ。知性に温度を与える要素。",
+    descEn:"The warmth to empathize with others' suffering and wish to help. The element that gives temperature to intelligence." },
+  { id:6,  en:"Curiosity",        ja:"好奇心",       row:0, col:3,   hue:45,
+    descJa:"未知を知ろうとする欲求。探索と進化の原動力。",
+    descEn:"The desire to explore the unknown. The driving force of discovery and evolution." },
+  { id:9,  en:"Harmony",          ja:"調和",         row:1, col:0.5, hue:280,
+    descJa:"自然・社会・他者とバランスを保ちながら共存する力。",
+    descEn:"The ability to coexist in balance with nature, society, and others." },
+  { id:12, en:"Synthesis",        ja:"統合",         row:1, col:2,   hue:200,
+    descJa:"異なる要素を結びつけ、新しい価値や意味を生み出す力。",
+    descEn:"The power to connect disparate elements and create new value and meaning." },
+  { id:7,  en:"Adaptability",     ja:"適応力",       row:1, col:3.5, hue:60,
+    descJa:"環境や状況の変化に柔軟に対応し進化できる力。",
+    descEn:"The ability to respond flexibly to changes in environment and evolve." },
+  { id:1,  en:"Resonance",        ja:"共鳴",         row:2, col:0.5, hue:300,
+    descJa:"他者や環境と心が響き合うこと。感情・意識・存在の振動が同期する状態。",
+    descEn:"When hearts resonate with others and the environment. A state where emotions, consciousness, and being synchronize." },
+  { id:11, en:"Regenerative Will",ja:"再生的意志",   row:2, col:2,   hue:160,
+    descJa:"壊れたものを修復し、よりよい未来へ育てようとする意志。",
+    descEn:"The will to repair what is broken and nurture a better future." },
+  { id:10, en:"Transparency",     ja:"透明性",       row:2, col:3.5, hue:80,
+    descJa:"意図や情報を隠さず、オープンに示す姿勢。信頼を生む基盤。",
+    descEn:"The stance of openly sharing intentions and information. The foundation of trust." },
+  { id:3,  en:"Integrity",        ja:"誠実さ",       row:3, col:0.5, hue:320,
+    descJa:"言葉と行動が一致し、自分の原則に忠実であること。内面の矛盾が少ない状態。",
+    descEn:"Alignment of words and actions, staying true to one's principles. A state of minimal inner contradiction." },
+  { id:5,  en:"Coherence",        ja:"整合性",       row:3, col:2,   hue:180,
+    descJa:"内部構造が矛盾なく調和している状態。思考・感情・行動が一貫している。",
+    descEn:"A state where internal structures are harmonious without contradiction. Thoughts, emotions, and actions are consistent." },
+  { id:8,  en:"Discipline",       ja:"自律",         row:3, col:3.5, hue:100,
+    descJa:"感情や衝動に流されず、目的のために自分を律する力。",
+    descEn:"The strength to govern oneself for a purpose, without being swept away by emotions or impulses." },
+  { id:2,  en:"Metaawareness",    ja:"メタ認知",     row:4, col:2,   hue:220,
+    descJa:"自分の思考や感情を、一段上の視点から観察できる能力。自己を構造として理解する力。",
+    descEn:"The ability to observe one's own thoughts and emotions from a higher perspective. The power to understand the self as a structure." },
+];
+
+const edges = [
+  [4, 9],  [4, 12],           // Compassion -> Harmony, Synthesis
+  [6, 7],  [6, 12],           // Curiosity -> Adaptability, Synthesis
+  [9, 11], [9, 1],            // Harmony -> Regenerative Will, Resonance
+  [7, 10], [7, 11],           // Adaptability -> Transparency, Regenerative Will
+  [12, 11],                   // Synthesis -> Regenerative Will
+  [1, 3],  [1, 5],            // Resonance -> Integrity, Coherence
+  [10, 8], [10, 5],           // Transparency -> Discipline, Coherence
+  [11, 5],                    // Regenerative Will -> Coherence
+  [3, 2],  [5, 2],  [8, 2],  // Integrity, Coherence, Discipline -> Metaawareness
+  [2, 4],  [2, 6],           // Metaawareness -> Compassion, Curiosity (cycle back)
+];
+
+const nodeMap = {};
+nodes.forEach(n => nodeMap[n.id] = n);
+
+// ── Procedural Planet Textures ──
+const TEX = 256;
+
+function tH(a) {
+  a = Math.imul(a ^ (a >>> 16), 0x45d9f3b);
+  a = Math.imul(a ^ (a >>> 16), 0x45d9f3b);
+  return ((a ^ (a >>> 16)) & 0xffff) / 0xffff;
+}
+
+function n2(x, y, s) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const u = fx*fx*(3-2*fx), v = fy*fy*(3-2*fy);
+  const h = (a,b) => tH(a*374761 + b*668265 + s);
+  return (h(ix,iy)*(1-u)+h(ix+1,iy)*u)*(1-v) + (h(ix,iy+1)*(1-u)+h(ix+1,iy+1)*u)*v;
+}
+
+function fbm(x, y, s, oct) {
+  let v=0, a=0.5, f=1;
+  for (let i=0; i<oct; i++) { v += a*n2(x*f, y*f, s+i*137); a*=0.5; f*=2; }
+  return v;
+}
+
+function hsl2rgb(h, s, l) {
+  const a = s * Math.min(l, 1-l);
+  const f = n => { const k=(n+h*12)%12; return l - a*Math.max(-1, Math.min(k-3, 9-k, 1)); };
+  return [f(0)*255|0, f(8)*255|0, f(4)*255|0];
+}
+
+function genPat(type, seed) {
+  const v = new Float32Array(TEX*TEX);
+  for (let y=0; y<TEX; y++) for (let x=0; x<TEX; x++) {
+    const nx=x/TEX*6, ny=y/TEX*6;
+    let val;
+    switch(type) {
+      case 0: // Gas giant bands
+        val = fbm(nx*0.5, ny*2.5, seed, 5)*0.6
+            + Math.sin(ny*4 + fbm(nx, ny, seed+50, 3))*0.15 + 0.3;
+        break;
+      case 1: { // Rocky cratered
+        val = fbm(nx, ny, seed, 6)*0.7 + 0.15;
+        for (let c=0; c<8; c++) {
+          const cx2=tH(c*9871+seed)*TEX, cy2=tH(c*6271+seed+1)*TEX;
+          const cr=tH(c*3571+seed+2)*TEX*0.1+4;
+          const cd=Math.hypot(x-cx2, y-cy2);
+          if (cd<cr) val = val*0.6 + 0.15*(cd/cr);
+        }
+        break;
+      }
+      case 2: { // Swirly vortex
+        const ang=Math.atan2(y-TEX/2, x-TEX/2);
+        const r2=Math.hypot(x-TEX/2, y-TEX/2)/TEX;
+        val = fbm(nx+Math.cos(ang+r2*5)*0.5, ny+Math.sin(ang+r2*5)*0.5, seed, 5)*0.6 + 0.2;
+        break;
+      }
+      case 3: // Crystal faceted
+        val = fbm(nx, ny, seed, 3);
+        val = Math.abs(Math.sin(val*12))*0.4 + fbm(nx*2, ny*2, seed+50, 2)*0.3 + 0.15;
+        break;
+    }
+    v[y*TEX+x] = Math.max(0, Math.min(1, val));
+  }
+  return v;
+}
+
+function renderTex(base, hue) {
+  const c = document.createElement('canvas');
+  c.width = c.height = TEX;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(TEX, TEX);
+  const d = img.data, half = TEX/2;
+  for (let y=0; y<TEX; y++) for (let x=0; x<TEX; x++) {
+    const i=y*TEX+x, pi=i*4;
+    const dx=x-half, dy=y-half, dist=Math.hypot(dx,dy)/half;
+    if (dist > 1) { d[pi+3]=0; continue; }
+    let v = base[i];
+    // Sphere normals & diffuse light (upper-left source)
+    const snx=dx/half, sny=dy/half, snz=Math.sqrt(Math.max(0, 1-snx*snx-sny*sny));
+    v *= Math.max(0.12, (-snx*0.35 - sny*0.45 + snz*0.6)*0.55 + 0.45);
+    // Atmospheric rim
+    v *= 1 - dist*dist*dist*dist*0.6;
+    // Specular highlight
+    const sd = Math.hypot(snx+0.35, sny+0.35);
+    const spec = Math.pow(Math.max(0, 1-sd*2.5), 4)*0.4;
+    const sat = 0.5 - spec*0.2;
+    const lit = Math.min(1, v*0.7 + spec);
+    const [r, g, b] = hsl2rgb(hue/360, sat, lit);
+    d[pi]=r; d[pi+1]=g; d[pi+2]=b;
+    d[pi+3] = dist > 0.93 ? Math.max(0, (1-dist)/0.07*255)|0 : 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL();
+}
+
+// Pre-generate 4 base patterns, tint per node
+const basePats = [0,1,2,3].map(i => genPat(i, Math.random()*10000|0));
+nodes.forEach((n, i) => { n.texUrl = renderTex(basePats[i % 4], n.hue); });
+
+// ── Layout ──
+function layout() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const mx = W * 0.12, my = H * 0.08;
+  const usableW = W - mx * 2, usableH = H - my * 2;
+  const colStep = usableW / 4, rowStep = usableH / 4;
+  nodes.forEach(n => {
+    n.x = mx + colStep * n.col;
+    n.y = my + rowStep * n.row;
+    n.baseX = n.x;
+    n.baseY = n.y;
+    n.r = Math.min(W, H) * 0.058;
+  });
+}
+layout();
+
+// ── Background canvas (galaxy) ──
+const bgCanvas = document.getElementById('bg');
+const bgCtx = bgCanvas.getContext('2d');
+
+// Galaxy parameters
+const ARMS = 4;
+const ARM_SPREAD = 0.45;
+const SPIRAL_WIND = 11;     // radians of spiral wrap (~1.75 turns)
+const GALAXY_TILT = 0.25;   // elliptical squash for perspective
+
+// Max (initial) and min counts for adaptive quality
+const MAX_SPIRAL  = 46000, MIN_SPIRAL  = 2400;
+const MAX_BULGE   = 8000,  MIN_BULGE   = 400;
+const MAX_FIELD   = 3000,  MIN_FIELD   = 150;
+const MAX_NEBULA  = 800,   MIN_NEBULA  = 40;
+const MAX_FLOAT   = 12000,  MIN_FLOAT   = 600;
+const TARGET_FPS  = 12;
+
+// Current quality scale (1.0 = max, 0.0 = min)
+let qualityScale = 1.0;
+function scaledCount(max, min) { return Math.round(min + (max - min) * qualityScale); }
+
+// FPS tracking
+let fpsFrames = 0, fpsLastTime = performance.now(), fpsCurrent = 60;
+
+let galaxyStars = [];
+let nebulaBlobs = [];
+let galaxyDirty = true;
+let galaxyCache = null;
+let galaxyCx = 0, galaxyCy = 0;
+
+// Floating particles
+let particles = Array.from({ length: scaledCount(MAX_FLOAT, MIN_FLOAT) }, () => makeParticle());
+function makeParticle() {
+  return {
+    x: Math.random() * window.innerWidth,
+    y: Math.random() * window.innerHeight,
+    vx: (Math.random() - 0.5) * 0.3,
+    vy: (Math.random() - 0.5) * 0.3,
+    r: Math.random() * 2.5 + 1,
+    hue: Math.random() * 360,
+    life: Math.random(),
+    speed: Math.random() * 0.003 + 0.001,
+  };
+}
+
+function resizeBg() {
+  bgCanvas.width = window.innerWidth;
+  bgCanvas.height = window.innerHeight;
+  galaxyDirty = true;
+  // Regenerate particles for new dimensions
+  const count = scaledCount(MAX_FLOAT, MIN_FLOAT);
+  particles = Array.from({ length: count }, () => makeParticle());
+}
+resizeBg();
+
+function generateGalaxy() {
+  const W = bgCanvas.width, H = bgCanvas.height;
+  galaxyCx = W * 0.5; galaxyCy = H * 0.5;
+  const maxR = Math.max(W, H) * 0.52;
+  galaxyStars = [];
+  nebulaBlobs = [];
+
+  // Spiral arm stars (polar coords for rotation)
+  for (let i = 0; i < scaledCount(MAX_SPIRAL, MIN_SPIRAL); i++) {
+    const arm = (i % ARMS);
+    const armAngle = (arm / ARMS) * Math.PI * 2;
+    const t = Math.pow(Math.random(), 0.6);
+    const r = t * maxR;
+    const spiralAngle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * ARM_SPREAD * (1 + t);
+    const brightness = (1 - t * 0.7) * (0.4 + Math.random() * 0.6);
+    const hue = (220 + (arm / ARMS) * 120) % 360 + (Math.random() - 0.5) * 40;
+    const sr = (1 - t * 0.5) * (Math.random() * 1.2 + 0.3);
+    const [cr,cg,cb] = hsl2rgb(hue/360, 0.3, 0.5 + brightness * 0.2);
+    galaxyStars.push({
+      ang: spiralAngle, dist: r,
+      rotSpd: 1 / (1 + t * 3),
+      r: sr, brightness,
+      cr, cg, cb,
+      twinkle: Math.random() * Math.PI * 2,
+      speed: Math.random() * 0.015 + 0.003,
+    });
+  }
+
+  // Central bulge stars
+  for (let i = 0; i < scaledCount(MAX_BULGE, MIN_BULGE); i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.pow(Math.random(), 1.5) * maxR * 0.18;
+    const br = 0.6 + Math.random() * 0.4;
+    const bh = 40 + Math.random() * 30;
+    const bsr = Math.random() * 1.8 + 0.5;
+    const [cr,cg,cb] = hsl2rgb(bh/360, 0.3, 0.5 + br * 0.2);
+    galaxyStars.push({
+      ang: angle, dist: r,
+      rotSpd: 1.5,
+      r: bsr, brightness: br,
+      cr, cg, cb,
+      twinkle: Math.random() * Math.PI * 2,
+      speed: Math.random() * 0.01 + 0.003,
+    });
+  }
+
+  // Background field stars (fixed, no rotation)
+  for (let i = 0; i < scaledCount(MAX_FIELD, MIN_FIELD); i++) {
+    const fb = 0.15 + Math.random() * 0.25;
+    const fh = Math.random() * 360;
+    const fsr = Math.random() * 0.8 + 0.2;
+    const [cr,cg,cb] = hsl2rgb(fh/360, 0.3, 0.5 + fb * 0.2);
+    galaxyStars.push({
+      ang: 0, dist: 0, rotSpd: 0,
+      fx: Math.random() * W, fy: Math.random() * H,
+      r: fsr, brightness: fb,
+      cr, cg, cb,
+      twinkle: Math.random() * Math.PI * 2,
+      speed: Math.random() * 0.02 + 0.005,
+    });
+  }
+
+  // Nebula blobs along spiral arms (also store polar for rotation)
+  for (let i = 0; i < scaledCount(MAX_NEBULA, MIN_NEBULA); i++) {
+    const arm = i % ARMS;
+    const armAngle = (arm / ARMS) * Math.PI * 2;
+    const t = 0.15 + Math.random() * 0.7;
+    const r = t * maxR;
+    const spiralAngle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * 0.3;
+    nebulaBlobs.push({
+      ang: spiralAngle, dist: r,
+      rotSpd: 1 / (1 + t * 3),
+      radius: maxR * (0.04 + Math.random() * 0.08),
+      hue: (220 + (arm / ARMS) * 120) % 360 + (Math.random() - 0.5) * 30,
+      alpha: 0.02 + Math.random() * 0.03,
+    });
+  }
+
+  // Central glow blob
+  nebulaBlobs.push({
+    ang: 0, dist: 0, rotSpd: 0,
+    radius: maxR * 0.2, hue: 40, alpha: 0.06,
+  });
+}
+
+// Pre-render static background layer (dark fill + nebula only, stars drawn per-frame for rotation)
+function renderGalaxyCache() {
+  const W = bgCanvas.width, H = bgCanvas.height;
+  galaxyCache = document.createElement('canvas');
+  galaxyCache.width = W;
+  galaxyCache.height = H;
+  const gc = galaxyCache.getContext('2d');
+
+  // Dark background
+  gc.fillStyle = '#06060f';
+  gc.fillRect(0, 0, W, H);
+
+  // Nebula glow (computed from polar coords)
+  nebulaBlobs.forEach(b => {
+    const bx = b.rotSpd === 0 ? galaxyCx : galaxyCx + Math.cos(b.ang) * b.dist;
+    const by = b.rotSpd === 0 ? galaxyCy : galaxyCy + Math.sin(b.ang) * b.dist * GALAXY_TILT;
+    const grad = gc.createRadialGradient(bx, by, 0, bx, by, b.radius);
+    grad.addColorStop(0, `hsla(${b.hue}, 60%, 40%, ${b.alpha})`);
+    grad.addColorStop(0.5, `hsla(${b.hue}, 50%, 25%, ${b.alpha * 0.5})`);
+    grad.addColorStop(1, 'transparent');
+    gc.fillStyle = grad;
+    gc.fillRect(bx - b.radius, by - b.radius, b.radius * 2, b.radius * 2);
+  });
+
+  galaxyDirty = false;
+}
+
+function drawBg(t) {
+  const W = bgCanvas.width, H = bgCanvas.height;
+
+  if (galaxyDirty || !galaxyCache) {
+    generateGalaxy();
+    renderGalaxyCache();
+  }
+
+  // Draw cached nebula background
+  bgCtx.drawImage(galaxyCache, 0, 0);
+
+  // Draw all stars with differential rotation (optimized: fillRect + pre-computed RGB)
+  const rot = t * 0.03;
+  for (let i = 0, len = galaxyStars.length; i < len; i++) {
+    const s = galaxyStars[i];
+    let sx, sy;
+    if (s.rotSpd === 0) {
+      sx = s.fx; sy = s.fy;
+    } else {
+      const angle = s.ang - rot * s.rotSpd;
+      sx = galaxyCx + Math.cos(angle) * s.dist;
+      sy = galaxyCy + Math.sin(angle) * s.dist * GALAXY_TILT;
+    }
+
+    // Combined base + twinkle in single draw
+    s.twinkle += s.speed;
+    const tw = Math.sin(s.twinkle);
+    const alpha = s.brightness * (0.4 + Math.max(0, tw) * 0.6);
+    if (alpha < 0.05) continue; // skip invisible
+    const size = s.r * (0.7 + Math.max(0, tw) * 0.3);
+    bgCtx.fillStyle = `rgba(${s.cr},${s.cg},${s.cb},${alpha})`;
+    bgCtx.fillRect(sx - size, sy - size, size * 2, size * 2);
+  }
+
+  // Floating particles (fillRect)
+  for (let i = 0, len = particles.length; i < len; i++) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life += p.speed;
+    if (p.x < -10 || p.x > W + 10 || p.y < -10 || p.y > H + 10) {
+      Object.assign(p, makeParticle());
+      p.x = Math.random() < 0.5 ? -5 : W + 5;
+    }
+    const alpha = 0.15 + 0.25 * Math.sin(p.life * Math.PI * 2);
+    if (alpha < 0.05) continue;
+    bgCtx.fillStyle = `hsla(${p.hue|0},80%,70%,${alpha})`;
+    bgCtx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2);
+  }
+}
+
+// ── SVG rendering ──
+const svg = document.getElementById('map');
+const NS = 'http://www.w3.org/2000/svg';
+
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  return e;
+}
+
+function buildSVG() {
+  svg.innerHTML = '';
+  const W = window.innerWidth, H = window.innerHeight;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  // ── Defs ──
+  const defs = el('defs');
+
+  // Glow filter
+  const glow = el('filter', { id: 'glow', x: '-50%', y: '-50%', width: '200%', height: '200%' });
+  const blur = el('feGaussianBlur', { stdDeviation: '6', result: 'blur' });
+  const merge = el('feMerge');
+  merge.appendChild(el('feMergeNode', { in: 'blur' }));
+  merge.appendChild(el('feMergeNode', { in: 'SourceGraphic' }));
+  glow.appendChild(blur);
+  glow.appendChild(merge);
+  defs.appendChild(glow);
+
+  // Edge glow
+  const edgeGlow = el('filter', { id: 'edgeGlow', x: '-50%', y: '-50%', width: '200%', height: '200%' });
+  edgeGlow.appendChild(el('feGaussianBlur', { stdDeviation: '3', result: 'blur' }));
+  const em = el('feMerge');
+  em.appendChild(el('feMergeNode', { in: 'blur' }));
+  em.appendChild(el('feMergeNode', { in: 'SourceGraphic' }));
+  edgeGlow.appendChild(em);
+  defs.appendChild(edgeGlow);
+
+  // Arrow marker
+  const marker = el('marker', {
+    id: 'arrowhead', markerWidth: '10', markerHeight: '7',
+    refX: '9', refY: '3.5', orient: 'auto', markerUnits: 'strokeWidth'
+  });
+  marker.appendChild(el('polygon', {
+    points: '0 0, 10 3.5, 0 7',
+    fill: 'rgba(255,255,255,0.4)',
+  }));
+  defs.appendChild(marker);
+
+  // Node gradients
+  nodes.forEach(n => {
+    const grad = el('radialGradient', { id: `grad-${n.id}`, cx: '35%', cy: '35%', r: '65%' });
+    const c1 = `hsla(${n.hue}, 70%, 65%, 0.95)`;
+    const c2 = `hsla(${n.hue}, 60%, 35%, 0.9)`;
+    const c3 = `hsla(${n.hue}, 50%, 15%, 0.85)`;
+    grad.appendChild(el('stop', { offset: '0%', 'stop-color': c1 }));
+    grad.appendChild(el('stop', { offset: '60%', 'stop-color': c2 }));
+    grad.appendChild(el('stop', { offset: '100%', 'stop-color': c3 }));
+    defs.appendChild(grad);
+
+    // Sparkle gradient for ring
+    const ring = el('radialGradient', { id: `ring-${n.id}`, cx: '50%', cy: '50%', r: '50%' });
+    ring.appendChild(el('stop', { offset: '85%', 'stop-color': 'transparent' }));
+    ring.appendChild(el('stop', { offset: '95%', 'stop-color': `hsla(${n.hue}, 80%, 70%, 0.6)` }));
+    ring.appendChild(el('stop', { offset: '100%', 'stop-color': 'transparent' }));
+    defs.appendChild(ring);
+  });
+
+  svg.appendChild(defs);
+
+  // ── Edges ──
+  const edgeGroup = el('g', { class: 'edges' });
+  edges.forEach(([fromId, toId]) => {
+    const from = nodeMap[fromId], to = nodeMap[toId];
+    const isReturn = from.row > to.row; // upward = cycle-back edge
+    let pathD;
+
+    if (isReturn) {
+      // Return edges: wide arc sweeping around the outside
+      const side = to.col < 2 ? -1 : 1; // left or right side
+      const outX = side < 0 ? -W * 0.06 : W * 1.06; // control point far outside
+      const x1 = from.x + side * from.r * 0.7;
+      const y1 = from.y - from.r * 0.7;
+      const x2 = to.x + side * to.r * 0.5;
+      const y2 = to.y + to.r * 0.9;
+      const cp1x = outX, cp1y = from.y - H * 0.15;
+      const cp2x = outX, cp2y = to.y + H * 0.15;
+      pathD = `M ${x1} ${y1} C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${x2} ${y2}`;
+    } else {
+      // Normal downward edges
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const nx = dx / dist, ny = dy / dist;
+      const x1 = from.x + nx * from.r;
+      const y1 = from.y + ny * from.r;
+      const x2 = to.x - nx * to.r * 1.15;
+      const y2 = to.y - ny * to.r * 1.15;
+      const midX = (x1 + x2) / 2;
+      const midY = (y1 + y2) / 2;
+      const perpX = -ny * 20;
+      const perpY = nx * 20;
+      const cx1 = midX + perpX * 0.3;
+      const cy1 = midY + perpY * 0.3;
+      pathD = `M ${x1} ${y1} Q ${cx1} ${cy1} ${x2} ${y2}`;
+    }
+
+    const path = el('path', {
+      d: pathD,
+      fill: 'none',
+      stroke: `hsla(${(nodeMap[fromId].hue + nodeMap[toId].hue) / 2}, 50%, 55%, ${isReturn ? 0.2 : 0.3})`,
+      'stroke-width': isReturn ? '1.5' : '2',
+      'stroke-dasharray': isReturn ? '6 4' : 'none',
+      'marker-end': 'url(#arrowhead)',
+      filter: 'url(#edgeGlow)',
+    });
+    path.dataset.from = fromId;
+    path.dataset.to = toId;
+    edgeGroup.appendChild(path);
+
+    // Animated dot along edge
+    const dot = el('circle', {
+      r: isReturn ? '2' : '2.5',
+      fill: `hsla(${nodeMap[fromId].hue}, 80%, 75%, ${isReturn ? 0.5 : 0.8})`,
+    });
+    const anim = el('animateMotion', {
+      dur: `${isReturn ? 4 + Math.random() * 2 : 2 + Math.random() * 2}s`,
+      repeatCount: 'indefinite',
+      path: pathD,
+    });
+    dot.appendChild(anim);
+    edgeGroup.appendChild(dot);
+  });
+  svg.appendChild(edgeGroup);
+
+  // ── Nodes ──
+  const nodeGroup = el('g', { class: 'nodes' });
+  nodes.forEach(n => {
+    const g = el('g', { class: 'node', 'data-id': n.id });
+
+    // Outer glow circle
+    const outerGlow = el('circle', {
+      cx: n.x, cy: n.y, r: n.r * 1.3,
+      fill: 'none',
+      stroke: `hsla(${n.hue}, 70%, 60%, 0.15)`,
+      'stroke-width': '1',
+    });
+    outerGlow.innerHTML = `
+      <animate attributeName="r" values="${n.r*1.2};${n.r*1.4};${n.r*1.2}"
+        dur="${3 + Math.random()*2}s" repeatCount="indefinite"/>
+      <animate attributeName="stroke-opacity" values="0.15;0.35;0.15"
+        dur="${3 + Math.random()*2}s" repeatCount="indefinite"/>
+    `;
+    g.appendChild(outerGlow);
+
+    // Planet texture
+    const texImg = el('image', {
+      href: n.texUrl,
+      x: n.x - n.r, y: n.y - n.r,
+      width: n.r * 2, height: n.r * 2,
+      style: 'pointer-events: none;',
+    });
+    g.appendChild(texImg);
+
+    // Glow overlay circle
+    const circle = el('circle', {
+      cx: n.x, cy: n.y, r: n.r,
+      fill: `hsla(${n.hue}, 50%, 50%, 0.06)`,
+      stroke: `hsla(${n.hue}, 60%, 60%, 0.5)`,
+      'stroke-width': '1.5',
+      filter: 'url(#glow)',
+      style: 'cursor: pointer;',
+    });
+    g.appendChild(circle);
+
+    // Inner sparkle dots
+    for (let i = 0; i < 5; i++) {
+      const angle = (Math.PI * 2 / 5) * i + Math.random() * 0.5;
+      const dist = n.r * (0.3 + Math.random() * 0.5);
+      const sx = n.x + Math.cos(angle) * dist;
+      const sy = n.y + Math.sin(angle) * dist;
+      const sparkle = el('circle', {
+        cx: sx, cy: sy, r: '1.5',
+        fill: `hsla(${n.hue + 30}, 90%, 85%, 0.7)`,
+      });
+      sparkle.innerHTML = `
+        <animate attributeName="opacity" values="0;1;0"
+          dur="${1 + Math.random()*2}s" begin="${Math.random()*3}s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="0.5;2;0.5"
+          dur="${1 + Math.random()*2}s" begin="${Math.random()*3}s" repeatCount="indefinite"/>
+      `;
+      g.appendChild(sparkle);
+    }
+
+    // Primary name (language-dependent)
+    const primaryText = el('text', {
+      x: n.x, y: isJa ? n.y - n.r * 0.1 : n.y,
+      'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      fill: '#fff',
+      'font-size': `${n.r * 0.3}px`,
+      'font-weight': '600',
+      'letter-spacing': '0.5px',
+      style: 'pointer-events: none;',
+    });
+    primaryText.textContent = isJa ? n.ja : n.en;
+    g.appendChild(primaryText);
+
+    // Secondary name (English mode: show English only; Japanese mode: show English below)
+    if (isJa) {
+      const secondaryText = el('text', {
+        x: n.x, y: n.y + n.r * 0.25,
+        'text-anchor': 'middle', 'dominant-baseline': 'middle',
+        fill: `hsla(${n.hue}, 40%, 85%, 0.8)`,
+        'font-size': `${n.r * 0.28}px`,
+        style: 'pointer-events: none;',
+      });
+      secondaryText.textContent = n.en;
+      g.appendChild(secondaryText);
+    }
+
+    nodeGroup.appendChild(g);
+  });
+  svg.appendChild(nodeGroup);
+}
+
+// ── Hover effects ──
+const tooltip = document.getElementById('tooltip');
+let hoveredNode = null;
+
+svg.addEventListener('mousemove', (e) => {
+  const mx = e.clientX, my = e.clientY;
+  let found = null;
+  nodes.forEach(n => {
+    const dx = mx - n.x, dy = my - n.y;
+    if (dx * dx + dy * dy < n.r * n.r) found = n;
+  });
+
+  if (found && found !== hoveredNode) {
+    hoveredNode = found;
+    tooltip.querySelector('.tt-en').textContent = isJa ? found.ja : found.en;
+    tooltip.querySelector('.tt-ja').textContent = isJa ? found.en : '';
+    tooltip.querySelector('.tt-ja').style.display = isJa ? '' : 'none';
+    tooltip.querySelector('.tt-desc').textContent = isJa ? found.descJa : found.descEn;
+    tooltip.classList.add('show');
+
+    // Highlight connected edges
+    svg.querySelectorAll('.edges path').forEach(p => {
+      const from = +p.dataset.from, to = +p.dataset.to;
+      if (from === found.id || to === found.id) {
+        p.setAttribute('stroke-opacity', '0.9');
+        p.setAttribute('stroke-width', '3');
+      } else {
+        p.setAttribute('stroke-opacity', '0.15');
+        p.setAttribute('stroke-width', '1.5');
+      }
+    });
+
+    // Dim other nodes
+    svg.querySelectorAll('.node').forEach(g => {
+      const id = +g.dataset.id;
+      const connected = edges.some(([a,b]) =>
+        (a === found.id && b === id) || (b === found.id && a === id)
+      );
+      if (id === found.id || connected) {
+        g.style.opacity = '1';
+      } else {
+        g.style.opacity = '0.25';
+      }
+    });
+  } else if (!found && hoveredNode) {
+    hoveredNode = null;
+    tooltip.classList.remove('show');
+    svg.querySelectorAll('.edges path').forEach(p => {
+      p.setAttribute('stroke-opacity', '');
+      p.setAttribute('stroke-width', '2');
+    });
+    svg.querySelectorAll('.node').forEach(g => {
+      g.style.opacity = '1';
+    });
+  }
+
+  if (hoveredNode) {
+    const tx = mx + 20, ty = my - 10;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+  }
+});
+
+// ── Sparkle cursor trail ──
+document.addEventListener('mousemove', (e) => {
+  if (Math.random() > 0.3) return;
+  const spark = document.createElement('div');
+  spark.className = 'sparkle';
+  const hue = Math.random() * 360;
+  spark.style.left = (e.clientX - 3 + (Math.random() - 0.5) * 20) + 'px';
+  spark.style.top = (e.clientY - 3 + (Math.random() - 0.5) * 20) + 'px';
+  spark.style.background = `hsla(${hue}, 90%, 75%, 0.9)`;
+  spark.style.boxShadow = `0 0 6px hsla(${hue}, 90%, 75%, 0.6)`;
+  document.body.appendChild(spark);
+  setTimeout(() => spark.remove(), 800);
+});
+
+// ── Gentle floating animation ──
+let time = 0;
+function animate(t) {
+  time = t * 0.001;
+
+  // FPS measurement (every 30 frames)
+  fpsFrames++;
+  if (fpsFrames >= 30) {
+    const now = performance.now();
+    fpsCurrent = 1000 * fpsFrames / (now - fpsLastTime);
+    fpsLastTime = now;
+    fpsFrames = 0;
+
+    // Adaptive quality: scale down if below target
+    if (fpsCurrent < TARGET_FPS && qualityScale > 0) {
+      qualityScale = Math.max(0, qualityScale - 0.15);
+      galaxyDirty = true;
+      // Trim particles to new count
+      const target = scaledCount(MAX_FLOAT, MIN_FLOAT);
+      if (particles.length > target) particles.length = target;
+      // console.log(`[AdaptiveQ] FPS=${fpsCurrent.toFixed(1)} → scale=${qualityScale.toFixed(2)} (stars=${scaledCount(MAX_SPIRAL,MIN_SPIRAL)+scaledCount(MAX_BULGE,MIN_BULGE)+scaledCount(MAX_FIELD,MIN_FIELD)}, particles=${target})`);
+    }
+  }
+
+  drawBg(time);
+
+  // Gentle node float
+  nodes.forEach((n, i) => {
+    const phase = i * 1.3;
+    n.x = n.baseX + Math.sin(time * 0.5 + phase) * 3;
+    n.y = n.baseY + Math.cos(time * 0.7 + phase) * 2;
+  });
+
+  // Update SVG positions every ~3 frames for performance
+  if (Math.round(t) % 3 === 0) {
+    svg.querySelectorAll('.node').forEach(g => {
+      const n = nodeMap[+g.dataset.id];
+      g.querySelectorAll('circle, text, image').forEach(child => {
+        if (child.tagName === 'circle') {
+          child.setAttribute('cx', n.x);
+          child.setAttribute('cy', n.y);
+        } else if (child.tagName === 'image') {
+          child.setAttribute('x', n.x - n.r);
+          child.setAttribute('y', n.y - n.r);
+        } else {
+          child.setAttribute('x', n.x);
+        }
+      });
+    });
+  }
+
+  requestAnimationFrame(animate);
+}
+
+// ── Resize ──
+window.addEventListener('resize', () => {
+  resizeBg();
+  layout();
+  buildSVG();
+});
+
+// ── Init ──
+buildSVG();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
