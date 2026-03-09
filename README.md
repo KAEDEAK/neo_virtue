@@ -1,5 +1,7 @@
 # Neo Virtue - Galaxy Parameters
 
+[Open Visualization](index.html)
+
 ## Galaxy Shape
 
 | Constant | Default | Description |
