@@ -1,6 +1,6 @@
 # Neo Virtue - Galaxy Parameters
 
-[Open Visualization](index.html)
+[Open Visualization](https://kaedeak.github.io/neo_virtue/)
 
 ## Galaxy Shape
 
