@@ -88,7 +88,9 @@
   <div class="tt-desc"></div>
 </div>
 
-<script>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js';
+
 // ── Language ──
 const isJa = /^ja\b/i.test(navigator.language);
 
@@ -147,6 +149,11 @@ const edges = [
 
 const nodeMap = {};
 nodes.forEach(n => nodeMap[n.id] = n);
+const adjacency = Object.fromEntries(nodes.map(n => [n.id, new Set()]));
+edges.forEach(([a, b]) => {
+  adjacency[a].add(b);
+  adjacency[b].add(a);
+});
 
 // ── Procedural Planet Textures ──
 const TEX = 256;
@@ -262,9 +269,14 @@ function layout() {
 }
 layout();
 
-// ── Background canvas (galaxy) ──
+// ── DOM ──
 const bgCanvas = document.getElementById('bg');
-const bgCtx = bgCanvas.getContext('2d');
+const svg = document.getElementById('map');
+const tooltip = document.getElementById('tooltip');
+const tooltipEn = tooltip.querySelector('.tt-en');
+const tooltipJa = tooltip.querySelector('.tt-ja');
+const tooltipDesc = tooltip.querySelector('.tt-desc');
+const NS = 'http://www.w3.org/2000/svg';
 
 // Galaxy parameters
 const ARMS = 4;
@@ -286,204 +298,461 @@ function scaledCount(max, min) { return Math.round(min + (max - min) * qualitySc
 
 // FPS tracking
 let fpsFrames = 0, fpsLastTime = performance.now(), fpsCurrent = 60;
-
-let galaxyStars = [];
-let nebulaBlobs = [];
 let galaxyDirty = true;
-let galaxyCache = null;
-let galaxyCx = 0, galaxyCy = 0;
+let edgeRefs = [];
+let nodeRefs = [];
 
-// Floating particles
-let particles = Array.from({ length: scaledCount(MAX_FLOAT, MIN_FLOAT) }, () => makeParticle());
-function makeParticle() {
+const STAR_VERTEX_SHADER = `
+  precision mediump float;
+  attribute float aAngle;
+  attribute float aDistance;
+  attribute float aRotSpeed;
+  attribute float aSize;
+  attribute float aBrightness;
+  attribute float aTwinklePhase;
+  attribute float aTwinkleSpeed;
+  attribute vec2 aFixedPos;
+  attribute vec3 aColor;
+  uniform float uTime;
+  uniform float uTilt;
+  uniform float uPixelRatio;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  void main() {
+    float twinkle = sin(aTwinklePhase + uTime * aTwinkleSpeed * 60.0);
+    float visibleTwinkle = max(0.0, twinkle);
+    vec2 pos;
+
+    if (aRotSpeed > 0.0) {
+      float angle = aAngle - uTime * 0.03 * aRotSpeed;
+      pos = vec2(cos(angle) * aDistance, -sin(angle) * aDistance * uTilt);
+    } else {
+      pos = aFixedPos;
+    }
+
+    vColor = aColor;
+    vAlpha = aBrightness * (0.4 + visibleTwinkle * 0.6);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 0.0, 1.0);
+    gl_PointSize = max(1.0, aSize * (0.7 + visibleTwinkle * 0.3) * uPixelRatio);
+  }
+`;
+
+const SOFT_POINT_FRAGMENT_SHADER = `
+  precision mediump float;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  void main() {
+    vec2 p = gl_PointCoord * 2.0 - 1.0;
+    float radius = length(p);
+    if (radius > 1.0) discard;
+
+    float falloff = 1.0 - smoothstep(0.0, 1.0, radius);
+    gl_FragColor = vec4(vColor, vAlpha * falloff);
+  }
+`;
+
+const NEBULA_VERTEX_SHADER = `
+  precision mediump float;
+  attribute float aAngle;
+  attribute float aDistance;
+  attribute float aRotSpeed;
+  attribute float aSize;
+  attribute float aAlpha;
+  attribute vec3 aColor;
+  uniform float uTime;
+  uniform float uTilt;
+  uniform float uPixelRatio;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  void main() {
+    float angle = aAngle - uTime * 0.03 * aRotSpeed;
+    vec2 pos = vec2(cos(angle) * aDistance, -sin(angle) * aDistance * uTilt);
+    vColor = aColor;
+    vAlpha = aAlpha;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 0.0, 1.0);
+    gl_PointSize = aSize * uPixelRatio;
+  }
+`;
+
+const NEBULA_FRAGMENT_SHADER = `
+  precision mediump float;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  void main() {
+    vec2 p = gl_PointCoord * 2.0 - 1.0;
+    float radius = length(p);
+    if (radius > 1.0) discard;
+
+    float glow = pow(1.0 - smoothstep(0.0, 1.0, radius), 2.5);
+    gl_FragColor = vec4(vColor, vAlpha * glow);
+  }
+`;
+
+const PARTICLE_VERTEX_SHADER = `
+  precision mediump float;
+  attribute vec2 aVelocity;
+  attribute float aSize;
+  attribute float aPhase;
+  attribute float aSpeed;
+  attribute vec3 aColor;
+  uniform float uTime;
+  uniform vec2 uViewport;
+  uniform float uPixelRatio;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  float wrapAxis(float value, float minValue, float maxValue) {
+    float span = maxValue - minValue;
+    return mod(value - minValue, span) + minValue;
+  }
+
+  void main() {
+    vec2 pos = position.xy + aVelocity * uTime * 60.0;
+    pos.x = wrapAxis(pos.x, -uViewport.x * 0.5 - 10.0, uViewport.x * 0.5 + 10.0);
+    pos.y = wrapAxis(pos.y, -uViewport.y * 0.5 - 10.0, uViewport.y * 0.5 + 10.0);
+
+    vColor = aColor;
+    vAlpha = max(0.0, 0.15 + 0.25 * sin(aPhase + uTime * aSpeed * 60.0 * 6.28318530718));
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 0.0, 1.0);
+    gl_PointSize = aSize * uPixelRatio;
+  }
+`;
+
+function makeGalaxyBackground(canvas) {
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: false,
+    alpha: false,
+    powerPreference: 'high-performance',
+  });
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.setClearColor(0x06060f, 1);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 1;
+
+  const stars = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uTilt: { value: GALAXY_TILT },
+      uPixelRatio: { value: 1 },
+    },
+    vertexShader: STAR_VERTEX_SHADER,
+    fragmentShader: SOFT_POINT_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const nebula = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uTilt: { value: GALAXY_TILT },
+      uPixelRatio: { value: 1 },
+    },
+    vertexShader: NEBULA_VERTEX_SHADER,
+    fragmentShader: NEBULA_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const particles = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uPixelRatio: { value: 1 },
+    },
+    vertexShader: PARTICLE_VERTEX_SHADER,
+    fragmentShader: SOFT_POINT_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+
   return {
-    x: Math.random() * window.innerWidth,
-    y: Math.random() * window.innerHeight,
-    vx: (Math.random() - 0.5) * 0.3,
-    vy: (Math.random() - 0.5) * 0.3,
-    r: Math.random() * 2.5 + 1,
-    hue: Math.random() * 360,
-    life: Math.random(),
-    speed: Math.random() * 0.003 + 0.001,
+    renderer,
+    scene,
+    camera,
+    materials: { stars, nebula, particles },
+    layers: { stars: null, nebula: null, particles: null },
   };
 }
 
-function resizeBg() {
-  bgCanvas.width = window.innerWidth;
-  bgCanvas.height = window.innerHeight;
-  galaxyDirty = true;
-  // Regenerate particles for new dimensions
-  const count = scaledCount(MAX_FLOAT, MIN_FLOAT);
-  particles = Array.from({ length: count }, () => makeParticle());
+const galaxyBg = makeGalaxyBackground(bgCanvas);
+
+function centeredX(x, width) {
+  return x - width * 0.5;
 }
-resizeBg();
 
-function generateGalaxy() {
-  const W = bgCanvas.width, H = bgCanvas.height;
-  galaxyCx = W * 0.5; galaxyCy = H * 0.5;
+function centeredY(y, height) {
+  return height * 0.5 - y;
+}
+
+function makeEmptyGeometry(count) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  return geometry;
+}
+
+function buildGalaxyGeometries() {
+  const W = window.innerWidth;
+  const H = window.innerHeight;
   const maxR = Math.max(W, H) * 0.52;
-  galaxyStars = [];
-  nebulaBlobs = [];
 
-  // Spiral arm stars (polar coords for rotation)
-  for (let i = 0; i < scaledCount(MAX_SPIRAL, MIN_SPIRAL); i++) {
-    const arm = (i % ARMS);
+  const spiralCount = scaledCount(MAX_SPIRAL, MIN_SPIRAL);
+  const bulgeCount = scaledCount(MAX_BULGE, MIN_BULGE);
+  const fieldCount = scaledCount(MAX_FIELD, MIN_FIELD);
+  const starCount = spiralCount + bulgeCount + fieldCount;
+
+  const starGeometry = makeEmptyGeometry(starCount);
+  const starAngle = new Float32Array(starCount);
+  const starDistance = new Float32Array(starCount);
+  const starRotSpeed = new Float32Array(starCount);
+  const starSize = new Float32Array(starCount);
+  const starBrightness = new Float32Array(starCount);
+  const starTwinklePhase = new Float32Array(starCount);
+  const starTwinkleSpeed = new Float32Array(starCount);
+  const starFixedPos = new Float32Array(starCount * 2);
+  const starColor = new Float32Array(starCount * 3);
+
+  const setStar = (idx, angle, distance, rotSpeed, size, brightness, phase, speed, color, fx = 0, fy = 0) => {
+    starAngle[idx] = angle;
+    starDistance[idx] = distance;
+    starRotSpeed[idx] = rotSpeed;
+    starSize[idx] = size;
+    starBrightness[idx] = brightness;
+    starTwinklePhase[idx] = phase;
+    starTwinkleSpeed[idx] = speed;
+    starFixedPos[idx * 2] = fx;
+    starFixedPos[idx * 2 + 1] = fy;
+    starColor[idx * 3] = color[0] / 255;
+    starColor[idx * 3 + 1] = color[1] / 255;
+    starColor[idx * 3 + 2] = color[2] / 255;
+  };
+
+  let starIndex = 0;
+
+  for (let i = 0; i < spiralCount; i++) {
+    const arm = i % ARMS;
     const armAngle = (arm / ARMS) * Math.PI * 2;
     const t = Math.pow(Math.random(), 0.6);
-    const r = t * maxR;
-    const spiralAngle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * ARM_SPREAD * (1 + t);
+    const distance = t * maxR;
+    const angle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * ARM_SPREAD * (1 + t);
     const brightness = (1 - t * 0.7) * (0.4 + Math.random() * 0.6);
     const hue = (220 + (arm / ARMS) * 120) % 360 + (Math.random() - 0.5) * 40;
-    const sr = (1 - t * 0.5) * (Math.random() * 1.2 + 0.3);
-    const [cr,cg,cb] = hsl2rgb(hue/360, 0.3, 0.5 + brightness * 0.2);
-    galaxyStars.push({
-      ang: spiralAngle, dist: r,
-      rotSpd: 1 / (1 + t * 3),
-      r: sr, brightness,
-      cr, cg, cb,
-      twinkle: Math.random() * Math.PI * 2,
-      speed: Math.random() * 0.015 + 0.003,
-    });
+    const radius = (1 - t * 0.5) * (Math.random() * 1.2 + 0.3);
+    setStar(
+      starIndex++,
+      angle,
+      distance,
+      1 / (1 + t * 3),
+      radius * 2,
+      brightness,
+      Math.random() * Math.PI * 2,
+      Math.random() * 0.015 + 0.003,
+      hsl2rgb(hue / 360, 0.3, 0.5 + brightness * 0.2),
+    );
   }
 
-  // Central bulge stars
-  for (let i = 0; i < scaledCount(MAX_BULGE, MIN_BULGE); i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const r = Math.pow(Math.random(), 1.5) * maxR * 0.18;
-    const br = 0.6 + Math.random() * 0.4;
-    const bh = 40 + Math.random() * 30;
-    const bsr = Math.random() * 1.8 + 0.5;
-    const [cr,cg,cb] = hsl2rgb(bh/360, 0.3, 0.5 + br * 0.2);
-    galaxyStars.push({
-      ang: angle, dist: r,
-      rotSpd: 1.5,
-      r: bsr, brightness: br,
-      cr, cg, cb,
-      twinkle: Math.random() * Math.PI * 2,
-      speed: Math.random() * 0.01 + 0.003,
-    });
+  for (let i = 0; i < bulgeCount; i++) {
+    const distance = Math.pow(Math.random(), 1.5) * maxR * 0.18;
+    const brightness = 0.6 + Math.random() * 0.4;
+    const hue = 40 + Math.random() * 30;
+    const radius = Math.random() * 1.8 + 0.5;
+    setStar(
+      starIndex++,
+      Math.random() * Math.PI * 2,
+      distance,
+      1.5,
+      radius * 2,
+      brightness,
+      Math.random() * Math.PI * 2,
+      Math.random() * 0.01 + 0.003,
+      hsl2rgb(hue / 360, 0.3, 0.5 + brightness * 0.2),
+    );
   }
 
-  // Background field stars (fixed, no rotation)
-  for (let i = 0; i < scaledCount(MAX_FIELD, MIN_FIELD); i++) {
-    const fb = 0.15 + Math.random() * 0.25;
-    const fh = Math.random() * 360;
-    const fsr = Math.random() * 0.8 + 0.2;
-    const [cr,cg,cb] = hsl2rgb(fh/360, 0.3, 0.5 + fb * 0.2);
-    galaxyStars.push({
-      ang: 0, dist: 0, rotSpd: 0,
-      fx: Math.random() * W, fy: Math.random() * H,
-      r: fsr, brightness: fb,
-      cr, cg, cb,
-      twinkle: Math.random() * Math.PI * 2,
-      speed: Math.random() * 0.02 + 0.005,
-    });
+  for (let i = 0; i < fieldCount; i++) {
+    const brightness = 0.15 + Math.random() * 0.25;
+    const hue = Math.random() * 360;
+    const radius = Math.random() * 0.8 + 0.2;
+    setStar(
+      starIndex++,
+      0,
+      0,
+      0,
+      radius * 2,
+      brightness,
+      Math.random() * Math.PI * 2,
+      Math.random() * 0.02 + 0.005,
+      hsl2rgb(hue / 360, 0.3, 0.5 + brightness * 0.2),
+      centeredX(Math.random() * W, W),
+      centeredY(Math.random() * H, H),
+    );
   }
 
-  // Nebula blobs along spiral arms (also store polar for rotation)
-  for (let i = 0; i < scaledCount(MAX_NEBULA, MIN_NEBULA); i++) {
+  starGeometry.setAttribute('aAngle', new THREE.BufferAttribute(starAngle, 1));
+  starGeometry.setAttribute('aDistance', new THREE.BufferAttribute(starDistance, 1));
+  starGeometry.setAttribute('aRotSpeed', new THREE.BufferAttribute(starRotSpeed, 1));
+  starGeometry.setAttribute('aSize', new THREE.BufferAttribute(starSize, 1));
+  starGeometry.setAttribute('aBrightness', new THREE.BufferAttribute(starBrightness, 1));
+  starGeometry.setAttribute('aTwinklePhase', new THREE.BufferAttribute(starTwinklePhase, 1));
+  starGeometry.setAttribute('aTwinkleSpeed', new THREE.BufferAttribute(starTwinkleSpeed, 1));
+  starGeometry.setAttribute('aFixedPos', new THREE.BufferAttribute(starFixedPos, 2));
+  starGeometry.setAttribute('aColor', new THREE.BufferAttribute(starColor, 3));
+
+  const nebulaCount = scaledCount(MAX_NEBULA, MIN_NEBULA) + 1;
+  const nebulaGeometry = makeEmptyGeometry(nebulaCount);
+  const nebulaAngle = new Float32Array(nebulaCount);
+  const nebulaDistance = new Float32Array(nebulaCount);
+  const nebulaRotSpeed = new Float32Array(nebulaCount);
+  const nebulaSize = new Float32Array(nebulaCount);
+  const nebulaAlpha = new Float32Array(nebulaCount);
+  const nebulaColor = new Float32Array(nebulaCount * 3);
+
+  const setNebula = (idx, angle, distance, rotSpeed, size, alpha, color) => {
+    nebulaAngle[idx] = angle;
+    nebulaDistance[idx] = distance;
+    nebulaRotSpeed[idx] = rotSpeed;
+    nebulaSize[idx] = size;
+    nebulaAlpha[idx] = alpha;
+    nebulaColor[idx * 3] = color[0] / 255;
+    nebulaColor[idx * 3 + 1] = color[1] / 255;
+    nebulaColor[idx * 3 + 2] = color[2] / 255;
+  };
+
+  let nebulaIndex = 0;
+  for (let i = 0; i < nebulaCount - 1; i++) {
     const arm = i % ARMS;
     const armAngle = (arm / ARMS) * Math.PI * 2;
     const t = 0.15 + Math.random() * 0.7;
-    const r = t * maxR;
-    const spiralAngle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * 0.3;
-    nebulaBlobs.push({
-      ang: spiralAngle, dist: r,
-      rotSpd: 1 / (1 + t * 3),
-      radius: maxR * (0.04 + Math.random() * 0.08),
-      hue: (220 + (arm / ARMS) * 120) % 360 + (Math.random() - 0.5) * 30,
-      alpha: 0.02 + Math.random() * 0.03,
-    });
+    const distance = t * maxR;
+    const angle = armAngle + t * SPIRAL_WIND + (Math.random() - 0.5) * 0.3;
+    const hue = (220 + (arm / ARMS) * 120) % 360 + (Math.random() - 0.5) * 30;
+    const radius = maxR * (0.04 + Math.random() * 0.08);
+    const alpha = 0.02 + Math.random() * 0.03;
+    setNebula(
+      nebulaIndex++,
+      angle,
+      distance,
+      1 / (1 + t * 3),
+      Math.min(radius * 2, 240),
+      alpha,
+      hsl2rgb(hue / 360, 0.45, 0.38),
+    );
   }
 
-  // Central glow blob
-  nebulaBlobs.push({
-    ang: 0, dist: 0, rotSpd: 0,
-    radius: maxR * 0.2, hue: 40, alpha: 0.06,
-  });
+  setNebula(
+    nebulaIndex,
+    0,
+    0,
+    0,
+    Math.min(maxR * 0.4, 260),
+    0.08,
+    hsl2rgb(40 / 360, 0.4, 0.3),
+  );
+
+  nebulaGeometry.setAttribute('aAngle', new THREE.BufferAttribute(nebulaAngle, 1));
+  nebulaGeometry.setAttribute('aDistance', new THREE.BufferAttribute(nebulaDistance, 1));
+  nebulaGeometry.setAttribute('aRotSpeed', new THREE.BufferAttribute(nebulaRotSpeed, 1));
+  nebulaGeometry.setAttribute('aSize', new THREE.BufferAttribute(nebulaSize, 1));
+  nebulaGeometry.setAttribute('aAlpha', new THREE.BufferAttribute(nebulaAlpha, 1));
+  nebulaGeometry.setAttribute('aColor', new THREE.BufferAttribute(nebulaColor, 3));
+
+  const particleCount = scaledCount(MAX_FLOAT, MIN_FLOAT);
+  const particleGeometry = new THREE.BufferGeometry();
+  const particlePositions = new Float32Array(particleCount * 3);
+  const particleVelocity = new Float32Array(particleCount * 2);
+  const particleSize = new Float32Array(particleCount);
+  const particlePhase = new Float32Array(particleCount);
+  const particleSpeed = new Float32Array(particleCount);
+  const particleColor = new Float32Array(particleCount * 3);
+
+  for (let i = 0; i < particleCount; i++) {
+    const x = centeredX(Math.random() * W, W);
+    const y = centeredY(Math.random() * H, H);
+    const hue = Math.random() * 360;
+    const color = hsl2rgb(hue / 360, 0.8, 0.7);
+
+    particlePositions[i * 3] = x;
+    particlePositions[i * 3 + 1] = y;
+    particleVelocity[i * 2] = (Math.random() - 0.5) * 0.3;
+    particleVelocity[i * 2 + 1] = (Math.random() - 0.5) * 0.3;
+    particleSize[i] = (Math.random() * 2.5 + 1) * 2;
+    particlePhase[i] = Math.random() * Math.PI * 2;
+    particleSpeed[i] = Math.random() * 0.003 + 0.001;
+    particleColor[i * 3] = color[0] / 255;
+    particleColor[i * 3 + 1] = color[1] / 255;
+    particleColor[i * 3 + 2] = color[2] / 255;
+  }
+
+  particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+  particleGeometry.setAttribute('aVelocity', new THREE.BufferAttribute(particleVelocity, 2));
+  particleGeometry.setAttribute('aSize', new THREE.BufferAttribute(particleSize, 1));
+  particleGeometry.setAttribute('aPhase', new THREE.BufferAttribute(particlePhase, 1));
+  particleGeometry.setAttribute('aSpeed', new THREE.BufferAttribute(particleSpeed, 1));
+  particleGeometry.setAttribute('aColor', new THREE.BufferAttribute(particleColor, 3));
+
+  return { starGeometry, nebulaGeometry, particleGeometry };
 }
 
-// Pre-render static background layer (dark fill + nebula only, stars drawn per-frame for rotation)
-function renderGalaxyCache() {
-  const W = bgCanvas.width, H = bgCanvas.height;
-  galaxyCache = document.createElement('canvas');
-  galaxyCache.width = W;
-  galaxyCache.height = H;
-  const gc = galaxyCache.getContext('2d');
+function replaceGalaxyLayer(name, geometry, material, renderOrder) {
+  if (galaxyBg.layers[name]) {
+    galaxyBg.scene.remove(galaxyBg.layers[name]);
+    galaxyBg.layers[name].geometry.dispose();
+  }
 
-  // Dark background
-  gc.fillStyle = '#06060f';
-  gc.fillRect(0, 0, W, H);
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  points.renderOrder = renderOrder;
+  galaxyBg.layers[name] = points;
+  galaxyBg.scene.add(points);
+}
 
-  // Nebula glow (computed from polar coords)
-  nebulaBlobs.forEach(b => {
-    const bx = b.rotSpd === 0 ? galaxyCx : galaxyCx + Math.cos(b.ang) * b.dist;
-    const by = b.rotSpd === 0 ? galaxyCy : galaxyCy + Math.sin(b.ang) * b.dist * GALAXY_TILT;
-    const grad = gc.createRadialGradient(bx, by, 0, bx, by, b.radius);
-    grad.addColorStop(0, `hsla(${b.hue}, 60%, 40%, ${b.alpha})`);
-    grad.addColorStop(0.5, `hsla(${b.hue}, 50%, 25%, ${b.alpha * 0.5})`);
-    grad.addColorStop(1, 'transparent');
-    gc.fillStyle = grad;
-    gc.fillRect(bx - b.radius, by - b.radius, b.radius * 2, b.radius * 2);
-  });
-
+function rebuildGalaxyScene() {
+  const { starGeometry, nebulaGeometry, particleGeometry } = buildGalaxyGeometries();
+  replaceGalaxyLayer('nebula', nebulaGeometry, galaxyBg.materials.nebula, 0);
+  replaceGalaxyLayer('stars', starGeometry, galaxyBg.materials.stars, 1);
+  replaceGalaxyLayer('particles', particleGeometry, galaxyBg.materials.particles, 2);
   galaxyDirty = false;
 }
 
-function drawBg(t) {
-  const W = bgCanvas.width, H = bgCanvas.height;
+function resizeBg() {
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
 
-  if (galaxyDirty || !galaxyCache) {
-    generateGalaxy();
-    renderGalaxyCache();
-  }
+  galaxyBg.renderer.setPixelRatio(pixelRatio);
+  galaxyBg.renderer.setSize(W, H, false);
+  galaxyBg.camera.left = -W * 0.5;
+  galaxyBg.camera.right = W * 0.5;
+  galaxyBg.camera.top = H * 0.5;
+  galaxyBg.camera.bottom = -H * 0.5;
+  galaxyBg.camera.updateProjectionMatrix();
 
-  // Draw cached nebula background
-  bgCtx.drawImage(galaxyCache, 0, 0);
+  galaxyBg.materials.stars.uniforms.uPixelRatio.value = pixelRatio;
+  galaxyBg.materials.nebula.uniforms.uPixelRatio.value = pixelRatio;
+  galaxyBg.materials.particles.uniforms.uPixelRatio.value = pixelRatio;
+  galaxyBg.materials.particles.uniforms.uViewport.value.set(W, H);
 
-  // Draw all stars with differential rotation (optimized: fillRect + pre-computed RGB)
-  const rot = t * 0.03;
-  for (let i = 0, len = galaxyStars.length; i < len; i++) {
-    const s = galaxyStars[i];
-    let sx, sy;
-    if (s.rotSpd === 0) {
-      sx = s.fx; sy = s.fy;
-    } else {
-      const angle = s.ang - rot * s.rotSpd;
-      sx = galaxyCx + Math.cos(angle) * s.dist;
-      sy = galaxyCy + Math.sin(angle) * s.dist * GALAXY_TILT;
-    }
-
-    // Combined base + twinkle in single draw
-    s.twinkle += s.speed;
-    const tw = Math.sin(s.twinkle);
-    const alpha = s.brightness * (0.4 + Math.max(0, tw) * 0.6);
-    if (alpha < 0.05) continue; // skip invisible
-    const size = s.r * (0.7 + Math.max(0, tw) * 0.3);
-    bgCtx.fillStyle = `rgba(${s.cr},${s.cg},${s.cb},${alpha})`;
-    bgCtx.fillRect(sx - size, sy - size, size * 2, size * 2);
-  }
-
-  // Floating particles (fillRect)
-  for (let i = 0, len = particles.length; i < len; i++) {
-    const p = particles[i];
-    p.x += p.vx;
-    p.y += p.vy;
-    p.life += p.speed;
-    if (p.x < -10 || p.x > W + 10 || p.y < -10 || p.y > H + 10) {
-      Object.assign(p, makeParticle());
-      p.x = Math.random() < 0.5 ? -5 : W + 5;
-    }
-    const alpha = 0.15 + 0.25 * Math.sin(p.life * Math.PI * 2);
-    if (alpha < 0.05) continue;
-    bgCtx.fillStyle = `hsla(${p.hue|0},80%,70%,${alpha})`;
-    bgCtx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2);
-  }
+  galaxyDirty = true;
 }
+resizeBg();
 
-// ── SVG rendering ──
-const svg = document.getElementById('map');
-const NS = 'http://www.w3.org/2000/svg';
+function drawBg(t) {
+  if (galaxyDirty || !galaxyBg.layers.stars) rebuildGalaxyScene();
+
+  galaxyBg.materials.stars.uniforms.uTime.value = t;
+  galaxyBg.materials.nebula.uniforms.uTime.value = t;
+  galaxyBg.materials.particles.uniforms.uTime.value = t;
+  galaxyBg.renderer.render(galaxyBg.scene, galaxyBg.camera);
+}
 
 function el(tag, attrs) {
   const e = document.createElementNS(NS, tag);
@@ -491,8 +760,42 @@ function el(tag, attrs) {
   return e;
 }
 
+function edgePathFor(from, to, W, H) {
+  const isReturn = from.row > to.row;
+  if (isReturn) {
+    const side = to.col < 2 ? -1 : 1;
+    const outX = side < 0 ? -W * 0.06 : W * 1.06;
+    const x1 = from.x + side * from.r * 0.7;
+    const y1 = from.y - from.r * 0.7;
+    const x2 = to.x + side * to.r * 0.5;
+    const y2 = to.y + to.r * 0.9;
+    const cp1x = outX, cp1y = from.y - H * 0.15;
+    const cp2x = outX, cp2y = to.y + H * 0.15;
+    return `M ${x1} ${y1} C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${x2} ${y2}`;
+  }
+
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const nx = dx / dist;
+  const ny = dy / dist;
+  const x1 = from.x + nx * from.r;
+  const y1 = from.y + ny * from.r;
+  const x2 = to.x - nx * to.r * 1.15;
+  const y2 = to.y - ny * to.r * 1.15;
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  const perpX = -ny * 20;
+  const perpY = nx * 20;
+  const cx1 = midX + perpX * 0.3;
+  const cy1 = midY + perpY * 0.3;
+  return `M ${x1} ${y1} Q ${cx1} ${cy1} ${x2} ${y2}`;
+}
+
 function buildSVG() {
   svg.innerHTML = '';
+  edgeRefs = [];
+  nodeRefs = [];
   const W = window.innerWidth, H = window.innerHeight;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
@@ -554,37 +857,8 @@ function buildSVG() {
   const edgeGroup = el('g', { class: 'edges' });
   edges.forEach(([fromId, toId]) => {
     const from = nodeMap[fromId], to = nodeMap[toId];
-    const isReturn = from.row > to.row; // upward = cycle-back edge
-    let pathD;
-
-    if (isReturn) {
-      // Return edges: wide arc sweeping around the outside
-      const side = to.col < 2 ? -1 : 1; // left or right side
-      const outX = side < 0 ? -W * 0.06 : W * 1.06; // control point far outside
-      const x1 = from.x + side * from.r * 0.7;
-      const y1 = from.y - from.r * 0.7;
-      const x2 = to.x + side * to.r * 0.5;
-      const y2 = to.y + to.r * 0.9;
-      const cp1x = outX, cp1y = from.y - H * 0.15;
-      const cp2x = outX, cp2y = to.y + H * 0.15;
-      pathD = `M ${x1} ${y1} C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${x2} ${y2}`;
-    } else {
-      // Normal downward edges
-      const dx = to.x - from.x, dy = to.y - from.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const nx = dx / dist, ny = dy / dist;
-      const x1 = from.x + nx * from.r;
-      const y1 = from.y + ny * from.r;
-      const x2 = to.x - nx * to.r * 1.15;
-      const y2 = to.y - ny * to.r * 1.15;
-      const midX = (x1 + x2) / 2;
-      const midY = (y1 + y2) / 2;
-      const perpX = -ny * 20;
-      const perpY = nx * 20;
-      const cx1 = midX + perpX * 0.3;
-      const cy1 = midY + perpY * 0.3;
-      pathD = `M ${x1} ${y1} Q ${cx1} ${cy1} ${x2} ${y2}`;
-    }
+    const isReturn = from.row > to.row;
+    const pathD = edgePathFor(from, to, W, H);
 
     const path = el('path', {
       d: pathD,
@@ -611,6 +885,15 @@ function buildSVG() {
     });
     dot.appendChild(anim);
     edgeGroup.appendChild(dot);
+
+    edgeRefs.push({
+      fromId,
+      toId,
+      isReturn,
+      path,
+      anim,
+      defaultWidth: isReturn ? '1.5' : '2',
+    });
   });
   svg.appendChild(edgeGroup);
 
@@ -655,6 +938,7 @@ function buildSVG() {
     g.appendChild(circle);
 
     // Inner sparkle dots
+    const sparkles = [];
     for (let i = 0; i < 5; i++) {
       const angle = (Math.PI * 2 / 5) * i + Math.random() * 0.5;
       const dist = n.r * (0.3 + Math.random() * 0.5);
@@ -671,11 +955,13 @@ function buildSVG() {
           dur="${1 + Math.random()*2}s" begin="${Math.random()*3}s" repeatCount="indefinite"/>
       `;
       g.appendChild(sparkle);
+      sparkles.push({ el: sparkle, dx: sx - n.x, dy: sy - n.y });
     }
 
     // Primary name (language-dependent)
+    const primaryY = isJa ? -n.r * 0.1 : 0;
     const primaryText = el('text', {
-      x: n.x, y: isJa ? n.y - n.r * 0.1 : n.y,
+      x: n.x, y: n.y + primaryY,
       'text-anchor': 'middle', 'dominant-baseline': 'middle',
       fill: '#fff',
       'font-size': `${n.r * 0.3}px`,
@@ -687,8 +973,9 @@ function buildSVG() {
     g.appendChild(primaryText);
 
     // Secondary name (English mode: show English only; Japanese mode: show English below)
+    let secondaryText = null;
     if (isJa) {
-      const secondaryText = el('text', {
+      secondaryText = el('text', {
         x: n.x, y: n.y + n.r * 0.25,
         'text-anchor': 'middle', 'dominant-baseline': 'middle',
         fill: `hsla(${n.hue}, 40%, 85%, 0.8)`,
@@ -700,12 +987,92 @@ function buildSVG() {
     }
 
     nodeGroup.appendChild(g);
+    nodeRefs.push({
+      node: n,
+      group: g,
+      outerGlow,
+      image: texImg,
+      circle,
+      sparkles,
+      primaryText,
+      primaryY,
+      secondaryText,
+      secondaryY: n.r * 0.25,
+    });
   });
   svg.appendChild(nodeGroup);
 }
 
+function updateEdgeVisuals() {
+  const W = window.innerWidth, H = window.innerHeight;
+  edgeRefs.forEach(edge => {
+    const pathD = edgePathFor(nodeMap[edge.fromId], nodeMap[edge.toId], W, H);
+    edge.path.setAttribute('d', pathD);
+    edge.anim.setAttribute('path', pathD);
+  });
+}
+
+function updateNodeVisuals() {
+  nodeRefs.forEach(ref => {
+    const { node, outerGlow, image, circle, sparkles, primaryText, primaryY, secondaryText, secondaryY } = ref;
+    outerGlow.setAttribute('cx', node.x);
+    outerGlow.setAttribute('cy', node.y);
+    image.setAttribute('x', node.x - node.r);
+    image.setAttribute('y', node.y - node.r);
+    circle.setAttribute('cx', node.x);
+    circle.setAttribute('cy', node.y);
+    sparkles.forEach(sparkle => {
+      sparkle.el.setAttribute('cx', node.x + sparkle.dx);
+      sparkle.el.setAttribute('cy', node.y + sparkle.dy);
+    });
+    primaryText.setAttribute('x', node.x);
+    primaryText.setAttribute('y', node.y + primaryY);
+    if (secondaryText) {
+      secondaryText.setAttribute('x', node.x);
+      secondaryText.setAttribute('y', node.y + secondaryY);
+    }
+  });
+}
+
+function setHoveredNode(found) {
+  if (found === hoveredNode) return;
+
+  hoveredNode = found;
+  if (!found) {
+    tooltip.classList.remove('show');
+    edgeRefs.forEach(edge => {
+      edge.path.removeAttribute('stroke-opacity');
+      edge.path.setAttribute('stroke-width', edge.defaultWidth);
+    });
+    nodeRefs.forEach(ref => {
+      ref.group.style.opacity = '1';
+    });
+    return;
+  }
+
+  tooltipEn.textContent = isJa ? found.ja : found.en;
+  tooltipJa.textContent = isJa ? found.en : '';
+  tooltipJa.style.display = isJa ? '' : 'none';
+  tooltipDesc.textContent = isJa ? found.descJa : found.descEn;
+  tooltip.classList.add('show');
+
+  edgeRefs.forEach(edge => {
+    if (edge.fromId === found.id || edge.toId === found.id) {
+      edge.path.setAttribute('stroke-opacity', '0.9');
+      edge.path.setAttribute('stroke-width', edge.isReturn ? '2.5' : '3');
+    } else {
+      edge.path.setAttribute('stroke-opacity', '0.15');
+      edge.path.setAttribute('stroke-width', '1.5');
+    }
+  });
+
+  nodeRefs.forEach(ref => {
+    const id = ref.node.id;
+    ref.group.style.opacity = id === found.id || adjacency[found.id].has(id) ? '1' : '0.25';
+  });
+}
+
 // ── Hover effects ──
-const tooltip = document.getElementById('tooltip');
 let hoveredNode = null;
 
 svg.addEventListener('mousemove', (e) => {
@@ -716,49 +1083,7 @@ svg.addEventListener('mousemove', (e) => {
     if (dx * dx + dy * dy < n.r * n.r) found = n;
   });
 
-  if (found && found !== hoveredNode) {
-    hoveredNode = found;
-    tooltip.querySelector('.tt-en').textContent = isJa ? found.ja : found.en;
-    tooltip.querySelector('.tt-ja').textContent = isJa ? found.en : '';
-    tooltip.querySelector('.tt-ja').style.display = isJa ? '' : 'none';
-    tooltip.querySelector('.tt-desc').textContent = isJa ? found.descJa : found.descEn;
-    tooltip.classList.add('show');
-
-    // Highlight connected edges
-    svg.querySelectorAll('.edges path').forEach(p => {
-      const from = +p.dataset.from, to = +p.dataset.to;
-      if (from === found.id || to === found.id) {
-        p.setAttribute('stroke-opacity', '0.9');
-        p.setAttribute('stroke-width', '3');
-      } else {
-        p.setAttribute('stroke-opacity', '0.15');
-        p.setAttribute('stroke-width', '1.5');
-      }
-    });
-
-    // Dim other nodes
-    svg.querySelectorAll('.node').forEach(g => {
-      const id = +g.dataset.id;
-      const connected = edges.some(([a,b]) =>
-        (a === found.id && b === id) || (b === found.id && a === id)
-      );
-      if (id === found.id || connected) {
-        g.style.opacity = '1';
-      } else {
-        g.style.opacity = '0.25';
-      }
-    });
-  } else if (!found && hoveredNode) {
-    hoveredNode = null;
-    tooltip.classList.remove('show');
-    svg.querySelectorAll('.edges path').forEach(p => {
-      p.setAttribute('stroke-opacity', '');
-      p.setAttribute('stroke-width', '2');
-    });
-    svg.querySelectorAll('.node').forEach(g => {
-      g.style.opacity = '1';
-    });
-  }
+  setHoveredNode(found);
 
   if (hoveredNode) {
     const tx = mx + 20, ty = my - 10;
@@ -766,6 +1091,7 @@ svg.addEventListener('mousemove', (e) => {
     tooltip.style.top = ty + 'px';
   }
 });
+svg.addEventListener('mouseleave', () => setHoveredNode(null));
 
 // ── Sparkle cursor trail ──
 document.addEventListener('mousemove', (e) => {
@@ -814,23 +1140,8 @@ function animate(t) {
     n.y = n.baseY + Math.cos(time * 0.7 + phase) * 2;
   });
 
-  // Update SVG positions every ~3 frames for performance
-  if (Math.round(t) % 3 === 0) {
-    svg.querySelectorAll('.node').forEach(g => {
-      const n = nodeMap[+g.dataset.id];
-      g.querySelectorAll('circle, text, image').forEach(child => {
-        if (child.tagName === 'circle') {
-          child.setAttribute('cx', n.x);
-          child.setAttribute('cy', n.y);
-        } else if (child.tagName === 'image') {
-          child.setAttribute('x', n.x - n.r);
-          child.setAttribute('y', n.y - n.r);
-        } else {
-          child.setAttribute('x', n.x);
-        }
-      });
-    });
-  }
+  updateNodeVisuals();
+  updateEdgeVisuals();
 
   requestAnimationFrame(animate);
 }
@@ -839,6 +1150,7 @@ function animate(t) {
 window.addEventListener('resize', () => {
   resizeBg();
   layout();
+  setHoveredNode(null);
   buildSVG();
 });
 
